@@ -62,7 +62,36 @@ class SSLSocket(socket):
                  ssl_version=PROTOCOL_SSLv23, ca_certs=None,
                  do_handshake_on_connect=True,
                  suppress_ragged_eofs=True,
-                 ciphers=None):
+                 ciphers=None,
+                 server_hostname=None,
+                 _context=None):
+        if _context:
+            self.context = _context
+        else:
+            if server_side and not certfile:
+                raise ValueError("certfile must be specified for server-side "
+                                 "operations")
+            if keyfile and not certfile:
+                raise ValueError("certfile must be specified")
+            if certfile and not keyfile:
+                keyfile = certfile
+            if not hasattr(_ssl, 'sslwrap'):
+                self.context = SSLContext(ssl_version)
+                if not server_side:
+                    self.context.check_hostname = True
+                self.context.verify_mode = cert_reqs
+                if ca_certs:
+                    self.context.load_verify_locations(ca_certs)
+                if certfile:
+                    self.context.load_cert_chain(certfile, keyfile)
+                if ciphers:
+                    self.context.set_ciphers(ciphers)
+        if server_side and server_hostname:
+            raise ValueError("server_hostname can only be specified "
+                             "in client mode")
+        self.server_side = server_side
+        self.server_hostname = server_hostname
+
         socket.__init__(self, _sock=sock)
 
         if PYPY:
@@ -91,15 +120,7 @@ class SSLSocket(socket):
                                                 cert_reqs, ssl_version, ca_certs,
                                                 ciphers)
             else:
-                self.context = __ssl__.SSLContext(ssl_version)
-                self.context.verify_mode = cert_reqs
-                if ca_certs:
-                    self.context.load_verify_locations(ca_certs)
-                if certfile:
-                    self.context.load_cert_chain(certfile, keyfile)
-                if ciphers:
-                    self.context.set_ciphers(ciphers)
-                self._sslobj = self.context._wrap_socket(self._sock, server_side=server_side, ssl_sock=self)
+                self._sslobj = self.context._wrap_socket(self._sock, server_side=server_side, server_hostname=server_hostname, ssl_sock=self)
 
             if do_handshake_on_connect:
                 self.do_handshake()
@@ -319,7 +340,8 @@ class SSLSocket(socket):
         """Perform a TLS/SSL handshake."""
         while True:
             try:
-                return self._sslobj.do_handshake()
+                self._sslobj.do_handshake()
+                break
             except SSLError as ex:
                 if ex.args[0] == SSL_ERROR_WANT_READ:
                     if self.timeout == 0.0:
@@ -333,6 +355,11 @@ class SSLSocket(socket):
                     self._wait(self._write_event, timeout_exc=_SSLErrorHandshakeTimeout)
                 else:
                     raise
+        if hasattr(self, 'context') and self.context.check_hostname:
+            if not self.server_hostname:
+                raise ValueError("check_hostname needs server_hostname "
+                                 "argument")
+            __ssl__.match_hostname(self._sslobj.peer_certificate(False), self.server_hostname)
 
     def connect(self, addr):
         """Connects to remote ADDR, and then wraps the connection in
@@ -401,17 +428,17 @@ def wrap_socket(sock, keyfile=None, certfile=None,
                 server_side=False, cert_reqs=CERT_NONE,
                 ssl_version=PROTOCOL_SSLv23, ca_certs=None,
                 do_handshake_on_connect=True,
-                suppress_ragged_eofs=True, ciphers=None):
+                suppress_ragged_eofs=True, ciphers=None, server_hostname=None):
     """Create a new :class:`SSLSocket` instance."""
     return SSLSocket(sock, keyfile=keyfile, certfile=certfile,
                      server_side=server_side, cert_reqs=cert_reqs,
                      ssl_version=ssl_version, ca_certs=ca_certs,
                      do_handshake_on_connect=do_handshake_on_connect,
                      suppress_ragged_eofs=suppress_ragged_eofs,
-                     ciphers=ciphers)
+                     ciphers=ciphers, server_hostname=server_hostname)
 
 
-def get_server_certificate(addr, ssl_version=PROTOCOL_SSLv3, ca_certs=None):
+def get_server_certificate(addr, ssl_version=PROTOCOL_SSLv23, ca_certs=None):
     """Retrieve the certificate from the server at the specified address,
     and return it as a PEM-encoded string.
     If 'ca_certs' is specified, validate the server cert against it.
